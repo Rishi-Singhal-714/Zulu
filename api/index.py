@@ -1,6 +1,7 @@
 import os, json, csv, random, re, requests
 from pathlib import Path
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # Add this import
 import openai
 
 ########## ENV LOAD ##########
@@ -16,9 +17,9 @@ else:
     print("⚠️  OpenAI API key not found")
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 ########## PERSISTENCE ##########
-# For Vercel, we'll use in-memory storage since file system is ephemeral
 conversations = {}
 
 ########## ZULU CLUB INFO ##########
@@ -85,7 +86,6 @@ Guidelines:
         return "Hey there! Welcome to Zulu Club — your premium lifestyle shopping experience with 100-minute delivery."
 
 ########## CATEGORY DETECTION ##########
-# For Vercel, we'll load products from the included CSV file
 _products, _categories, _category_index = [], set(), {}
 
 def _canonicalize(text):
@@ -94,7 +94,6 @@ def _canonicalize(text):
 def _load_products():
     global _products, _categories, _category_index
     try:
-        # For Vercel deployment, the CSV file should be in the same directory
         csv_path = Path(__file__).parent / "products.csv"
         if not csv_path.exists():
             print("⚠️ products.csv not found in deployment directory")
@@ -153,7 +152,6 @@ def get_random_products(cat, n=3):
     items = _category_index.get(cat, [])
     return random.sample(items, min(n, len(items))) if items else []
 
-# Load products on startup
 _load_products()
 
 ########## SEND MESSAGE VIA GALLABOX API ##########
@@ -173,8 +171,10 @@ def send_whatsapp_message(phone, message_text):
     try:
         r = requests.post(GALLABOX_API_URL, headers=headers, json=payload)
         print("📤 Gallabox send response:", r.status_code, r.text)
+        return r.status_code == 200
     except Exception as e:
         print(f"❌ Gallabox send error: {e}")
+        return False
 
 def send_whatsapp_image(phone, image_url, caption):
     """Send image message via Gallabox API"""
@@ -192,8 +192,10 @@ def send_whatsapp_image(phone, image_url, caption):
     try:
         r = requests.post(GALLABOX_API_URL, headers=headers, json=payload)
         print("📤 Gallabox image response:", r.status_code, r.text)
+        return r.status_code == 200
     except Exception as e:
         print(f"❌ Gallabox image send error: {e}")
+        return False
 
 ########## MESSAGE HANDLER ##########
 def handle_message(session_id, msg):
@@ -215,19 +217,33 @@ def handle_message(session_id, msg):
     return {"type": "text", "content": reply}
 
 ########## GALLABOX WEBHOOK ##########
-@app.route("/gallabox_webhook", methods=["POST"])
+@app.route("/gallabox_webhook", methods=["POST", "GET"])  # Allow both POST and GET
 def gallabox_webhook():
     """Handle WhatsApp messages via Gallabox"""
+    
+    # Handle GET requests for webhook verification
+    if request.method == "GET":
+        print("🔍 Webhook verification request received")
+        verify_token = request.args.get('verify_token')
+        challenge = request.args.get('challenge')
+        
+        # Return challenge for webhook verification
+        if challenge:
+            return challenge, 200
+        return jsonify({"status": "ok", "message": "Webhook is active"}), 200
+    
+    # Handle POST requests for actual messages
     try:
         data = request.get_json(force=True)
-        print("📩 Received Gallabox message:", data)
+        print("📩 Received Gallabox message:", json.dumps(data, indent=2))
 
+        # Extract message data based on Gallabox webhook structure
         user_phone = data.get("data", {}).get("from", "unknown")
         user_message = data.get("data", {}).get("message", {}).get("text", "").strip()
 
         if not user_message:
             send_whatsapp_message(user_phone, "Hi 👋! Welcome to Zulu Club — your premium lifestyle shopping destination!")
-            return jsonify({"status": "ok"})
+            return jsonify({"status": "ok"}), 200
 
         response = handle_message(user_phone, user_message)
 
@@ -257,6 +273,10 @@ def home():
         "endpoints": {
             "webhook": "/gallabox_webhook (POST)",
             "health": "/ping (GET)"
+        },
+        "environment_configured": {
+            "openai": bool(OPENAI_API_KEY),
+            "gallabox": bool(GALLABOX_API_KEY and GALLABOX_API_SECRET and GALLABOX_CHANNEL_ID)
         }
     })
 
@@ -264,14 +284,6 @@ def home():
 def ping():
     return jsonify({"status": "ok", "message": "Zulu Club Chat Assistant is running!"})
 
-########## VERCEL COMPATIBILITY ##########
-# Vercel requires the app to be named 'app'
-# The file should be named api/index.py for the root endpoint
-# Or you can use vercel.json for routing
-
+# Vercel compatibility
 if __name__ == "__main__":
-    # This block won't run on Vercel, but kept for local testing
     print("🚀 Zulu Club Chat Assistant started...")
-    print(f"🔑 OpenAI API: {'✅ Connected' if OPENAI_API_KEY else '❌ Missing'}")
-    print(f"💬 Gallabox API: {'✅ Configured' if GALLABOX_API_KEY and GALLABOX_API_SECRET and GALLABOX_CHANNEL_ID else '❌ Missing credentials'}")
-    print("✅ Ready to receive messages!")

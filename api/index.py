@@ -1,7 +1,6 @@
 import os, json, csv, random, re, requests
 from pathlib import Path
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # Add this import
 import openai
 
 ########## ENV LOAD ##########
@@ -17,7 +16,14 @@ else:
     print("⚠️  OpenAI API key not found")
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+
+# Enable CORS for all routes
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 ########## PERSISTENCE ##########
 conversations = {}
@@ -94,12 +100,17 @@ def _canonicalize(text):
 def _load_products():
     global _products, _categories, _category_index
     try:
-        csv_path = Path(__file__).parent / "products.csv"
-        if not csv_path.exists():
-            print("⚠️ products.csv not found in deployment directory")
-            return
+        # For Vercel, the CSV should be in the same directory as the Python file
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        csv_path = os.path.join(current_dir, "products.csv")
         
-        with csv_path.open(newline="", encoding="utf-8") as f:
+        if not os.path.exists(csv_path):
+            print("⚠️ products.csv not found at:", csv_path)
+            # Try alternative path
+            csv_path = "products.csv"
+            
+        with open(csv_path, 'r', newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for r in reader:
                 name = r.get("name", "").strip()
@@ -152,11 +163,16 @@ def get_random_products(cat, n=3):
     items = _category_index.get(cat, [])
     return random.sample(items, min(n, len(items))) if items else []
 
+# Load products on startup
 _load_products()
 
 ########## SEND MESSAGE VIA GALLABOX API ##########
 def send_whatsapp_message(phone, message_text):
     """Send a text message to user via Gallabox API"""
+    if not all([GALLABOX_API_KEY, GALLABOX_API_SECRET, GALLABOX_CHANNEL_ID]):
+        print("❌ Gallabox credentials missing")
+        return False
+        
     headers = {
         "Content-Type": "application/json",
         "x-api-key": GALLABOX_API_KEY,
@@ -169,7 +185,7 @@ def send_whatsapp_message(phone, message_text):
         "message": {"text": message_text}
     }
     try:
-        r = requests.post(GALLABOX_API_URL, headers=headers, json=payload)
+        r = requests.post(GALLABOX_API_URL, headers=headers, json=payload, timeout=10)
         print("📤 Gallabox send response:", r.status_code, r.text)
         return r.status_code == 200
     except Exception as e:
@@ -178,6 +194,10 @@ def send_whatsapp_message(phone, message_text):
 
 def send_whatsapp_image(phone, image_url, caption):
     """Send image message via Gallabox API"""
+    if not all([GALLABOX_API_KEY, GALLABOX_API_SECRET, GALLABOX_CHANNEL_ID]):
+        print("❌ Gallabox credentials missing")
+        return False
+        
     headers = {
         "Content-Type": "application/json",
         "x-api-key": GALLABOX_API_KEY,
@@ -190,7 +210,7 @@ def send_whatsapp_image(phone, image_url, caption):
         "message": {"image": image_url, "caption": caption}
     }
     try:
-        r = requests.post(GALLABOX_API_URL, headers=headers, json=payload)
+        r = requests.post(GALLABOX_API_URL, headers=headers, json=payload, timeout=10)
         print("📤 Gallabox image response:", r.status_code, r.text)
         return r.status_code == 200
     except Exception as e:
@@ -217,9 +237,13 @@ def handle_message(session_id, msg):
     return {"type": "text", "content": reply}
 
 ########## GALLABOX WEBHOOK ##########
-@app.route("/gallabox_webhook", methods=["POST", "GET"])  # Allow both POST and GET
+@app.route("/gallabox_webhook", methods=["POST", "GET", "OPTIONS"])
 def gallabox_webhook():
     """Handle WhatsApp messages via Gallabox"""
+    
+    # Handle OPTIONS for CORS preflight
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
     
     # Handle GET requests for webhook verification
     if request.method == "GET":
@@ -234,8 +258,11 @@ def gallabox_webhook():
     
     # Handle POST requests for actual messages
     try:
-        data = request.get_json(force=True)
-        print("📩 Received Gallabox message:", json.dumps(data, indent=2))
+        data = request.get_json(force=True) if request.data else {}
+        print("📩 Received Gallabox message data")
+        
+        if not data:
+            return jsonify({"status": "error", "message": "No data received"}), 400
 
         # Extract message data based on Gallabox webhook structure
         user_phone = data.get("data", {}).get("from", "unknown")
